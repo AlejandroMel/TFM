@@ -1,6 +1,10 @@
 #!/bin/bash
 
 MYHOME=~/work/amelones/script
+MAXJOBS=`nproc`
+MAXJOBS=$(( MAXJOBS / 3 ))
+#MAXJOBS=8
+
 
 sequence=${1:-sequence.fasta}
 cm=${2:-contactmap.rr5}
@@ -90,6 +94,7 @@ function generate_3D_templates()
     if [ ! -e ss.pdb ] ; then
         # check if anglor generated a secondary structure fasta file
         if [ -e anglor/seq.ss ] ; then
+            echo "Creating model based on Secondary Structure from ANGLOR"
             python3 $pepbuild -i $sequence \
 	        -o ss.pdb -s anglor/seq.ss
         fi
@@ -97,7 +102,8 @@ function generate_3D_templates()
 
     if [ ! -e pp.pdb ] ; then
         if [ -e anglor/seq.ann.phi -a -e anglor/seq.svr.psi ] ; then
-            python3 ${MYHOME}/script/PepBuild.py -i $sequence \
+            echo "Creating model based on Phi/Psi angles from ANGLOR"
+            python3 $pepbuild -i $sequence \
 	        -o pp.pdb -P anglor/seq.ann.phi -S anglor/seq.svr.psi
         fi
     fi
@@ -109,115 +115,173 @@ function generate_3D_templates()
     # them as well.
 }
 
+
+
+
 generate_3D_templates $sequence
+
 # if $sequence does not exist, then we will not generate any templates
 # and only pre-existing templates will be used, this is ugly, we should
 # think this out
 
 # process each starting configuration in turn using two steps
 
+njobs=0
 for i in *.pdb ; do
     if [[ "$i" == *"+.pdb" ]] ; then echo ">>> skipping $i" ; continue ; fi
-    name=`basename $i .pdb`
+    echo ">>> Refining $i"
     
-    # Prepare CA-rest-file
-    # RR 5-column format is AA1 AA2 dist-min(0) dist-max(8) probability
-    # CABS format is AA1 AA2 distance weight
-    # Use with minimal distance
-    cat "$cm"  | cut -f1,2,3,5 -d' ' \
-               | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
-               > "$name.0.crf"
-    # Use with maximal distance 
-    # this is commented out because it does not give good results
-    #cat "$cm"  | cut -f1,2,4,5 -d' ' \
-    #           | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
-    #           > "$name.8.crf"
-        
-    # carry out first simulation step
-    if [ ! -e "${name}.done" ] ; then
-        date -u > ${name}.doing
-        CABSflex 	${comment# use CABSflex -h for help} \
-                 -i ${name}.pdb \
-    	         -w ${name} \
-                 -v 3   ${comment# verbose level (log)} \
-                 -A 	${comment# make all atom models} \
-                 -M 	${comment# make contact map} \
-                 -f 1	${comment# 0 fully flexible backbone / 1 stiff bb)}  \
-                 -a 40	${comment# mc-annealing (def: 20)} \
-                 -y 100	${comment# mc-cycles (def: 50)} \
-                        ${comment# the trajectory will have 40x100=4000 frames} \
-                 -t 3.5 1.0 ${comment# temperature start end (def: 1.4 1.4)} \
-                 --weighted-fit gauss \
-                 -S 	${comment# save CABS files}\
-                 -C 	${comment# save config} \
-                 --ca-rest-file "$name.0.crf" \
-                 ${comment# -L YYMMDDhhmmssfile.cbs (load CABS file)} \
-                 |& tee ${name}.log 
-        date -u >> ${name}.doing
-        if [ ! -s ${name}/output_pdbs/model_0.pdb ] ; then
-            mv ${name}.doing "${name}.fail"
-            touch FAIL
-        else
-            mv ${name}.doing "${name}.done"
-        fi
+    if [ $njobs -gt $MAXJOBS ] ; then
+        wait -n		# wait for one slot to be free
+        njobs=$((njobs - 1))
     fi
 
-    ### XXX JR XXX ###
-    # ESTO NO ESTÁ BIEN
-    # Estamos escogiendo el primer modelo, pero podría ser mejor otro.
-    # Deberíamos puntuarlos aquí y elegir el mejor antes de seguir, p. ej.
-    ###
-    # PRUEBA PARA VER SI COINCIDEN EL PRIMERO Y EL MEJOR
-    # score the models generated in the first refinement step
-    $MYHOME/apollo.sh $sequence ${name}/output_pdbs
-    if [ -e ${name}.apollo/output_pdbs.avg ] ; then
-        echo ">>> $name SCORED USING APOLLO"
-        # if scoring went OK, pick the model with best average score
-        best_model=`cat ${name}.apollo/output_pdbs.avg | tail -n+5 | head -n1`
-    else
-        # pick first model if one exists
-        if [ -s ${name}/output_pdbs/model_0.pdb ] ; then
-            best_model=${name}/output_pdbs/model_0.pdb
-        else
-            # no model could be obtained, proceed to next template
-            continue
-        fi
-    fi
-    echo ">>>THE BEST MODEL FOR $name IS $best_model (IS IT 'model_0.pdb'???)"
-    # cp ${name}/output_pdbs/$best_model ${name}+.pdb
-    # O BIEN, HACER AMBOS EL PRIMERO Y EL QUE TENGA MEJOR SCORE
+    (
 
-    # carry out a second simulation step using the first model produced
-    # in the previous step assuming it is the best.
-    if [ ! -e "${name}+.done" ] ; then
-        if [ ! -s ${name}/output_pdbs/model_0.pdb ] ; then
-            continue
+        name=`basename $i .pdb`
+
+        # Prepare CA-rest-file
+        # RR 5-column format is AA1 AA2 dist-min(0) dist-max(8) probability
+        # CABS format is AA1 AA2 distance weight
+        # Use with minimal distance
+        cat "$cm"  | cut -f1,2,3,5 -d' ' \
+                   | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
+                   > "$name.0.crf"
+        # Use with maximal distance 
+        # this is commented out because it does not give good results
+        #cat "$cm"  | cut -f1,2,4,5 -d' ' \
+        #           | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
+        #           > "$name.8.crf"
+
+        # carry out first simulation step
+        if [ ! -e "${name}.done" -o ! -s "${name}.doing" ] ; then
+            rm -f ${name}.fail
+            date -u > ${name}.doing
+            # XXX remove this 'if' later
+            if [ ! -e ${name}/output_pdbs/model_0.pdb ] ; then
+            CABSflex 	${comment# use CABSflex -h for help} \
+                     -i ${name}.pdb \
+    	             -w ${name} \
+                     -v 3   ${comment# verbose level (log)} \
+                     -A 	${comment# make all atom models} \
+                     -M 	${comment# make contact map} \
+                     -f 1	${comment# 0 fully flexible backbone / 1 stiff bb)}  \
+                     -a 40	${comment# mc-annealing (def: 20)} \
+                     -y 100	${comment# mc-cycles (def: 50)} \
+                            ${comment# the trajectory will have 40x100=4000 frames} \
+                     -t 3.5 1.0 ${comment# temperature start end (def: 1.4 1.4)} \
+                     --weighted-fit gauss \
+                     -S 	${comment# save CABS files}\
+                     -C 	${comment# save config} \
+                     --ca-rest-file "$name.0.crf" \
+                     ${comment# -L YYMMDDhhmmssfile.cbs (load CABS file)} \
+                     |& tee ${name}.log 
+            fi
+            date -u >> ${name}.doing
+            if [ ! -s ${name}/output_pdbs/model_0.pdb ] ; then
+                mv ${name}.doing "${name}.fail"
+                echo "CABSflex $name" >> FAIL
+            else
+                # IMPORTANT: APOLLO will generate its results in a directory
+                # named after the name of the sequence. Since the model we
+                # are analyzing has a different (standardized) name, we want 
+                # to use it (the model name) instead of the original name of 
+                # the query sequence. After all, the model we are analyzing
+                # corresponds to the original sequence.
+                cp $sequence $name/$name.fasta
+                cd $name
+                mkdir -p models
+                if [ ! -s ${name}.apollo/models.avg ] ; then
+                    cp output_pdbs/model*.pdb models
+                    $MYHOME/apollo.sh $name.fasta models |& tee ${name}.apollo.log
+                fi
+                if [ ! -s ${name}.apollo/models.avg ] ; then
+                    echo ">>>>>>>> [${name}]"
+                    pwd
+                    echo "--------"
+                    ls
+                    echo "--------"
+                    ls -l ${name}.apollo
+                    echo "--------"
+                    echo ">>>> WARNING: apollo failed for $name"
+                fi
+                cd ..
+                mv ${name}.doing "${name}.done"
+            fi
+
         fi
-        cp ${name}/output_pdbs/model_0.pdb ${name}+.pdb
-        date -u > ${name}+.doing
-        CABSflex -i ${name}+.pdb \
-    	         -w ${name}+ \
-                 -v 3 \
-                 -A 	${comment# make all atom models} \
-                 -M 	${comment# make contact map} \
-                 -f 1	${comment# 0 fully flexible backbone / 1 stiff bb)}  \
-                 -a 40	${comment# mc-annealing (def: 20)} \
-                 -y 100	${comment# mc-cycles (def: 50)} \
-                 -t 3.5 1.0 ${comment# temperature initial final (def: 1.4 1.4)}\
-                 --weighted-fit gauss \
-                 -S 	${comment# save CABS files}\
-                 -C 	${comment# save config} \
-                 --ca-rest-file "$name.0.crf" \
-                 ${comment# -L YYMMDDhhmmssfile.cbs (load CABS file)} \
-                 |& tee ${name}+.log 
-        date -u >> ${name}+.doing
-        if [ ! -s ${name}+/output_pdbs/model_0.pdb ] ; then
-            mv ${name}+.doing "${name}+.fail"
-            touch FAIL
-        else
-            mv ${name}+.doing "${name}+.done"
+
+        # carry out a second simulation step using the best first model 
+        # produced djin the previous step.
+        if [ ! -e "${name}+.done" ] ; then
+            if [ -e ${name}.apollo/models.avg ] ; then
+                echo ">>> $name SCORED USING APOLLO"
+                # if scoring went OK, pick the model with best average score
+                best_model=`cat ${name}/${name}.apollo/models.avg | tail -n+5 | head -n1`
+            else
+                # pick first model if one exists
+                best_model=${name}/models/model_0.pdb
+            fi
+            echo ">>>THE BEST MODEL FOR $name IS $best_model (IS IT 'model_0.pdb'???)"
+            # We might consider doing both if they exist, the one
+            # with best average Apollo score and the first one
+            ### JR ### THINK ABOUT THIS
+            
+	    if [ -e "$best_model" ] ; then
+                cp ${name}/output_pdbs/model_0.pdb ${name}+.pdb
+                #cp $best_model ${name}+.pdb
+                rm -f ${name}+.fail
+                date -u > ${name}+.doing
+                CABSflex -i ${name}+.pdb \
+    	                 -w ${name}+ \
+                         -v 3 \
+                         -A 	${comment# make all atom models} \
+                         -M 	${comment# make contact map} \
+                         -f 1	${comment# 0 fully flexible backbone / 1 stiff bb)}  \
+                         -a 40	${comment# mc-annealing (def: 20)} \
+                         -y 100	${comment# mc-cycles (def: 50)} \
+                         -t 3.5 1.0 ${comment# temperature initial final (def: 1.4 1.4)}\
+                         --weighted-fit gauss \
+                         -S 	${comment# save CABS files}\
+                         -C 	${comment# save config} \
+                         --ca-rest-file "$name.0.crf" \
+                         ${comment# -L YYMMDDhhmmssfile.cbs (load CABS file)} \
+                         |& tee ${name}+.log 
+                date -u >> ${name}+.doing
+            else
+                echo "WARNING: ${best_model} does not exists"
+            fi
+            if [ ! -s ${name}+/output_pdbs/model_0.pdb ] ; then
+                mv ${name}+.doing "${name}+.fail"
+                echo "CABSflex $name" >> FAIL
+            else
+                cp $sequence ${name}+/${name}+.fasta
+                cd ${name}+
+                mkdir -p models
+                if [ ! -s ${name}+.apollo/models.avg ] ; then
+                    cp output_pdbs/model*.pdb models
+                    $MYHOME/apollo.sh ${name}+.fasta models |& tee ${name}+.apollo.log
+                fi
+                if [ ! -s ${name}+.apollo/models.avg ] ; then
+                    echo ">>>>>>>> [${name}+]"
+                    pwd
+                    echo "--------"
+                    ls
+                    echo "--------"
+                    ls -l ${name}+.apollo
+                    echo "--------"
+                    echo ">>>> WARNING: apollo failed for ${name}+"
+                fi
+                cd ..
+                mv ${name}+.doing "${name}+.done"
+            fi
         fi
-    fi
+
+    ) &
+
+    njobs=$((njobs + 1))
+   
+
 done
 
 if [ ! -e FAIL ] ; then
