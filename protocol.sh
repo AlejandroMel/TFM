@@ -2,36 +2,96 @@
 #
 #	A protocol for ab-initio protein structure prediction.
 #
-sequence=$1
-
-sequence=`realpath $sequence`
-name=${sequence%.*}
-name=${name##*/}
-
-
-maxmodels=5
-
-myname=`basename "${BASH_SOURCE[0]}"`
-mydir=`dirname "${BASH_SOURCE[0]}"`
-MYHOME=`realpath $mydir`
-myhome=~/work/amelones/script
-myhome=`dirname $0`
-myhome=`realpath $myhome`
-
-# Utilities
-export FUNCS_BASE=$myhome/lib
-source $FUNCS_BASE/fs_funcs.bash
-source $FUNCS_BASE/util_funcs.bash
-source $FUNCS_BASE/split_fasta.sh
-source $FUNCS_BASE/modellerscr.sh
-
-redirect_std_out_err $name/log $myname.$name
+input_sequence=$1
 
 VERBOSE=1
 
+input_sequence=`realpath $input_sequence`	# use full path name to avoid trouble
+sequence=`basename $input_sequence`
+name=${sequence%.*}		# remove suffix (.fasta/.fas/.faa/...)
+name=${name##*/}		# remove pathname (leave only sequence name)
+
+maxmodels=5			# Maximum number of models to carry forward
+
+myname=`basename "${BASH_SOURCE[0]}"`	# identify out source directory
+MYNAME=`realpath "$myname"`
+mydir=`dirname "${BASH_SOURCE[0]}"`
+MYHOME=`realpath "$mydir"`
+#myhome=~/work/amelones/script
+myhome=`dirname "$0"`
+myhome=`realpath "$myhome"`	# should be the same as $MYHOME
+
+# Load utility functions
+export FUNCS_BASE="$myhome"/lib
+source "$FUNCS_BASE"/fs_funcs.bash
+source "$FUNCS_BASE"/util_funcs.bash
+source "$FUNCS_BASE"/split_fasta.bash       # defines split_fasta_seq_to_dir()
+source "$FUNCS_BASE"/i-tasser.bash          # defines i-tasser()
+source "$FUNCS_BASE"/alphafold.bash         # defines alphafold()
+source "$FUNCS_BASE"/dncon2.bash            # defines dncon2()
+source "$FUNCS_BASE"/apollo.bash            # defines apollo()
+source "$FUNCS_BASE"/pepbuild.bash          # defines pepbuild()
+source "$FUNCS_BASE"/cabs_cm_00.bash        # defines cabs_cm_00()
+source "$FUNCS_BASE"/fix_3D_templates.bash  # defines fix_3D_templates()
+source "$FUNCS_BASE"/martini.bash           # defines martini()
+#declare -F			       # list all known functions for debugging
+#declare -F | awk '{print $NF}' | sort | egrep -v "^_" 
+
+if [ -x "$FUNCS_BASE"/modellerscr.sh ] ; then
+    source "$FUNCS_BASE"/modellerscr.sh
+fi                                     # defines modellerscr() 
+
+if [ "$name" = "" ] ; then
+    errexit "$input_sequence results in an empty sequence name"
+fi
+
+# we will save all output in a directory named after the sequence
+out="$name"
+
+# create initial output folders
+mkdir -p "$out"
+mkdir -p "$out"/starting_models
+mkdir -p "$out/log"
+
+# send all output to a log file inside the output folder
+redirect_std_out_err "$out/log" "$myname"."$out"
+
+# save a copy of the sequence in the output folder
+cp "$input_sequence" "$out"
+
+# if the sequence is too large, split it into pieces
+if [ "YES" = "NO" ] ; then
+    split_fasta_seq_to_dir $out/$sequence $out
+    nchunks=$?
+    if [ $nchunks -gt 1 ] ; then
+        # if we got several overlapping pieces, process each separately
+        cd $out
+        # run this script ($0) on each of the subsequences    
+        for i in *overlap.fasta ; do
+            $0 $i
+        done
+        # at this point we should have models for each of the overlapping
+        # subsequences
+        # now we need to run modeller using as templates the models selected
+        # for each of the subsequences to get a full model for the whole 
+        # protein
+        # Create the directory where modeller will be run
+        mkdir -p modeller
+        # Copy the protein sequence in that folder
+        cp $sequence modeller/sequence.fasta
+        for i in *.overlap.fasta ; do	# copy templates to modeller folder
+            piece_out=`basename $i .fasta`
+            cp $piece_out/model/model1.pdb modeller/
+        done
+        cd modeller
+    #    modellerscr modeller/sequence.fasta 
+        exit
+    fi
+fi
+
 ######################################################################
 #                                                                    #
-# First, generate some (hopefully) realistic models                  #
+# First, generate some (hopefully) realistic/useful models           #
 #                                                                    #
 ######################################################################
 
@@ -39,125 +99,148 @@ VERBOSE=1
 # i-tasser
 #	(ideally we would like to also run Sparks and RaptorX)
 # DNCon2
-#	with various methods (confold1, confold2 and unicon3d)
+#	only with CONFOLD2 as it works better than CONFOLD1 and UNICON3D
 # Alphafold2
 #
 # Multicom
 #	(ideally we would include Quark, C-Quark and Rosetta as well)
+# PepBuild
+#	To ensure we at least have some naïve initial models to refine
+# 	Phi-Psi-prediction
+# 	Secondary structure prediction
+# 	naïve structures (alpha, beta, coiled-coil, extended, random)
 #
-# Phi-Psi-prediction
-# Secondary structure prediction
-# naïve structures (alpha, beta, coiled-coil, extended, random)
-
-
-mkdir -p $name		# (should have already been created for the log file)
-# save a copy of the sequence
-cp $sequence $name
-cp $sequence $name/sequence.fasta
-
-split_fasta_seq_to_dir $name/sequence.fasta $name
-nchunks=$?
-if [ $nchunks -gt 1 ] ; then
-    cd $name
-    # run this script on each of the subsequences    
-    for i in *overlap.fasta ; do
-        $0 $i
-    done
-    # at this point we should have models for each of the overlapping
-    # subsequences
-    # now we need to run modeller using as templates the models selected
-    # for each of the subsequences to get a full model for the whole 
-    # protein
-    mkdir -p modeller
-    cp $sequence modeller/sequence.fasta
-    cd modeller
-    build_model_from_pieces modeller/sequence.fasta 
-    exit
-fi
-
 
 # I-TASSER
 # --------
 # Try to generate an homology model using I-TASSER inside
-# the $name directory
+# the $out directory
 # if the directory does not exist we have not run i-tasser yet
-if [ ! -d $name/i-tasser/$name ] ; then
     # if there is not at least one model, try again
-    if [ ! -e $name/i-tasser/$name/model1.pdb ] ; then
-        cd $name
-        # this will save i-tasser-specific output to detailed log files
-        eval i-tasser `basename $sequence` $LOG
-        cd ..
-    fi
+if [ ! -e "$out/i-tasser/$out/model1.pdb" ] ; then
+    cd $out
+    eval i-tasser $sequence $LOG
+    cd ..
+else
+    notecont "Using already existing I-TASSER predictions"
 fi
+# try to copy models to the starting models folder
+if [ ! -s $out/starting_models/i-tasser-model_1.pdb ] ; then
+    # I-TASSER has already ranked the models
+    for ((i=1;i<=$maxmodels;i++)); do
+        if [ -s $out/i-tasser/$out/model$i.pdb ] ; then
+            #cp $out/i-tasser/$out/model$i.pdb   $out/starting_models/i-tasser-model_$i.pdb
+            # add chain ID
+            cat $out/i-tasser/$out/model$i.pdb \
+            | sed -e '/^ATOM  / s/^\(.\{21\}\) /\1A/' \
+            > $out/starting_models/i-tasser-model_$i.pdb
+        fi
+    done
+fi
+
 
 # ALPHAFOLD
 # ---------
 # Try to generate an ab-initio model using alphafold inside
-# the $name directory
+# the $out directory
 # If alphafold hasn't been run yet there will be no directory
-if [ ! -e $name/alphafold/$name ] ; then
+if [ ! -e $out/alphafold/$out ] ; then
     if [ -x ~/contrib/alphafold/bin/alphafold ] ; then
-        cd $name
-        # this will save alphafold-specific output to detailed log files
-	eval ~/contrib/alphafold/bin/alphafold $sequence $LOG
+        cd $out
+	eval alphafold $sequence $LOG
         cd ..
     else
-	echo "Not using AlphaFold2 because it is not installed"
+	warncont "Not using AlphaFold2 because it is not installed"
         #exit 1
     fi
+else
+    notecont "Using already existing AlphaFold2 predictions"
+fi
+
+# copy resulting models (AlphaFold produces up to three sets of varying quality)
+# We prefer the ranked, optimized models whenever possible
+if [ ! -s $out/starting_models/$out/af_model_1.pdb ] ; then
+    for ((i=0;i<$maxmodels;i++)); do
+        if [ -s $out/alphafold/$out/ranked_$i.pdb ] ; then
+            # add chain ID
+            cat $out/alphafold/$out/ranked_$i.pdb   \
+            | sed -e '/^ATOM  / s/^\(.\{21\}\) /\1A/' \
+            >  $out/starting_models/af_model_$((i + 1)).pdb
+        fi
+    done
+fi
+# try again: maybe the models could not be ranked by alphafold but could be optimized
+if [ ! -s $out/starting_models/$out/af_model_1.pdb ] ; then
+    for ((i=1;i<=$maxmodels;i++)); do
+        if [ -s $out/alphafold/$out/relaxed_model_$i.pdb ] ; then
+            cat $out/alphafold/$out/relaxed_model_$i.pdb   \
+            | sed -e '/^ATOM  / s/^\(.\{21\}\) /\1A/' \
+            >  $out/starting_models/af_model_$i.pdb
+        fi
+    done
+fi
+# try again: maybe they could not be optimized but some were still generated
+# (we do not care because we will optimize them anyway)
+if [ ! -s $out/starting_models/$out/af_model_1.pdb ] ; then
+    for ((i=1;i<=$maxmodels;i++)); do
+        if [ -s $out/alphafold/$out/unrelaxed_model_$i.pdb ] ; then
+            cat $out/alphafold/$out/unrelaxed_model_$i.pdb   \
+            | sed -e '/^ATOM  / s/^\(.\{21\}\) /\1A/' \
+            >  $out/starting_models/af_model_$i.pdb
+        fi
+    done
 fi
 
 
 # DNCON2
 # ------
-# dncon2 will create a directory named $name/dncon2 to save its output
-# that's why we start it from above $name (no need to enter into it)
-if [ ! -d ./$name/dncon2/confold2-$name.dncon2/top-models ] ; then
-    echo "Running DNCON2"
-    # this will save all the results in "./dncon2/"
-    eval $myhome/dncon2.sh $sequence CONFOLD2 $LOG
-    #$myhome/dncon2.sh $sequence CONFOLD1	# we considered doing these too
-    #$myhome/dncon2.sh $sequence UNICON3D	# but they were worse
+# dncon2 will create a directory named $out/dncon2 to save its output
+# that's why we start it from above $out (no need to enter into it)
+if [ ! -e $out/dncon2 ] ; then
+    notecont "Running DNCON2"
+    cd $out
+    eval dncon2 $sequence $LOG
+    #dncon2 $sequence CONFOLD2	     # works best, and is now the default
+    #dncon2 $sequence CONFOLD1       # we considered doing these too
+    #dncon2 $sequence UNICON3D       # but they were worse
+    cd ..
+else
+    notecont "Using already existing DNCON2 predictions"
 fi
 
-# the resulting models will be in ./dncon2/confold2-$name.dncon2/top-models
-# there may be a large amount of models (100+)
-# we will use a quick score function
-# first we check if confold2 was run
-if [ -d $name/dncon2/confold2-$name.dncon2/ ] ; then
-    # remember current position for later and 'cd' to the confold2 directory
-    pushd $name/dncon2/confold2-$name.dncon2/		# google this for info
-    
-    # check if apollo has already been run
-    if [ ! -s $name.apollo/top-models.avg ] ; then
-	echo "Running apollo on CONFOLD2 top-models"
-	eval $myhome/apollo.sh $sequence top-models $LOG
-    fi
+# the resulting models will be in $out/dncon2/$out
+if [ ! -s $out/starting_models/1.dncon2.*.pdb ] ; then
+    # dncon2 has already ranked the models
+    for ((i=1;i<=$maxmodels;i++)); do
+        if [ -s $out/dncon2/$out/$i.dncon2.*.pdb ] ; then
+            # add chain ID
+            cat $out/dncon2/$out/$i.dncon2.*.pdb \
+            | sed -e '/^ATOM  / s/\(.\{21\}\) /\1A/' \
+            > $out/starting_models/`basename $out/dncon2/$out/$i.dncon2.*.pdb`
+        fi
+    done
+fi
 
-    # check if apollo run successfully
-    if [ ! -e $name.apollo/top-models.avg ] ; then
-       echo "ERROR: HORROR: I cannot find apollo scores for any DNCON2+CONFOLD2 model"
-       exit 1
-    fi
+cd $out
+    for i in starting_models/*dncon2*.pdb ; do
+        cp $i $i.orig
+            if grep -q 'ATOM.................AA' $i.orig ; then
+                cat $i.orig \
+                | sed -e 's/ AA\([ 0-9]\)/ A \1/' \
+                >  $i
+            fi
+    done
+cd ..
 
-    # let us select the best $maxmodels models produced by CONFOLD2 and 
-    # store them named by score order
-    if [ ! -e ../models/1.*.pdb ] ; then
-	echo "Selecting $maxmodels best CONFOLD2 models"
-	mkdir -p ../models
-	order=0
-	cat $name.apollo/top-models.avg \
-	| tail -n+5 \
-	| head -n$maxmodels \
-	| while read model score ; do
-            order=$(( order + 1 ))
-            #cp top-models/$model ../models/$order.confold2.$model
-	    cp top-models/$model ../models/$order.$model
-	done
-    fi
-    # recover our last saved position and return to it
-    popd	# return to where we came from (above $name)
+# basic models built with PepBuild
+if isempty $out/pepbuild/$out ; then
+    cd $out
+    eval pepbuild $sequence $LOG
+    cd ..
+fi
+if ! isempty $out/pepbuild/$out ; then
+    mkdir -p $out/starting_models
+    cp $out/pepbuild/$out/*pdb $out/starting_models/
 fi
 
 
@@ -168,88 +251,28 @@ fi
 #                                                                    #
 ######################################################################
 
-# we will work inside $name to keep everything contained in a single directory
-pushd $name
-if [ ! -d cabs ] ; then 
-    mkdir cabs
+# we will work inside $out to keep everything contained in a single directory
+if [ ! -d $out/cabs ] ; then 
+    mkdir -p $out/cabs
 fi
 
 # add the sequence if not already there
-if [ ! -s cabs/`basename $sequence` ] ; then
-    cp $sequence cabs
+if [ ! -s $out/cabs/`basename $sequence` ] ; then
+    cp $sequence $out/cabs/`basename $sequence`
 fi
 
-# check if there are any models generated by I-TASSER and copy up to
-# $maxmodels to the cabs folder for further refinement
-#for i in ((i=1;i<=maxmodels;i++)) ; do
-if [ ! -s cabs/1.i-tasser-model1.pdb ] ; then
-    echo "Selecting $maxmodels best I-TASSER models"
-    END=$maxmodels
-    for ((i=1;i<=END;i++)); do
-        if [ -s i-tasser/$name/model$i.pdb ] ; then
-            # we cannot just copy because i-tasser does not define chain-IDs
-	    #cp i-tasser/$name/model$i.pdb cabs/$i.i-tasser-model$i.pdb
-            # add chain-ID to models and save them in cabs directory
-            cat i-tasser/$name/model$i.pdb \
-            | sed -e '/^ATOM  / s/\(.\{21\}\) /\1A/' \
-            > cabs/$i.i-tasser-model$i.pdb
-        fi
-    done
-fi
-
-# check if alphafold generated any models and copy them to the cabs folder
-if [ -s alphafold/$name/ranked_1.pdb ] ; then
-    # ranked are relaxed models renumbered by quality
-    # so their numbers may not match
-    for i in 0 1 2 3 4 ; do
-        f=alphafold/$name/ranked_$i.pdb
-        cp $f cabs/`echo $f | sed -e 's/relaxed_model/alphafold/g'`
-    done
-else
-    # unrelaxed are as output by alphafold
-    # relaxed are the unrelaxed after AMBER optimization
-    # so, we prefer first relaxed and if there is none, unrelaxed
-    for i in 1 2 3 4 5 ; do
-        fr=alphafold/$name/relaxed_model_$i.pdb
-        fu=alphafold/$name/unrelaxed_model_$i.pdb
-        if [ -s $fr ] ; then
-            cp $fr cabs/alphafold_opt_$i.pdb
-        elif [ -s $fu ] ; then
-            cp $fu cabs/alphafold_raw_$i.pdb
-        fi
-    done
-fi
 
 # check if dncon2 generated a contact matrix and, if so, use it with CABS
-if [ -s dncon2/$name.rr.raw ] ; then
-    cm=$name.rr.raw
-    cp dncon2/$cm cabs
+if [ -s $out/dncon2/$out.rr.raw ] ; then
+    cm=$out.rr.raw
 else
-    echo "ERROR: DNCON2 did not create a Contact Matrix $name.rr.raw"
+    warncont "DNCON2 did not create a Contact Matrix $out.rr.raw"
     #exit 1   #comment this line in case you detect scarce alignments 
     #during the execution of dncon2 for your protein
 fi
 
-# check if CONFOLD2 could generate any models and add them for CABS refinement
-if [ -d dncon2/models ] ; then
-    # the directory exists, so dncon2 did not fail to generate it
-    # but it might be empty, let's check if it contains any models
-#    if [ "$( ls -A dncon2/models )" ] ; then
-#        # yes, copy the models to folder cabs for CABS to use as templates
-#	 # NOTE: this will fail because these models lack chain-ID (see below)
-#	 cp -v dncon2/models/*.pdb cabs
-#    fi
-    # this is an alternative approach that gives us more freedom
-    for i in `ls -A dncon2/models/*` ; do
-        #echo $i
-        # add chain-ID to models and save them in cabs directory so that
-        # CABS will find them and refine them
-        cat $i \
-        | sed -e '/^ATOM  / s/\(.\{21\}\) /\1A/' \
-        > cabs/`basename $i`
-    done
-fi
-
+# copy all starting models to the CABS folder
+cp $out/starting_models/*pdb $out/cabs/
 
 
 ######################################################################
@@ -259,19 +282,25 @@ fi
 ######################################################################
 
 
-cd cabs
-eval $myhome/cabscm00.03.sh `basename $sequence` $cm $LOG
-
+cd $out
+eval cabs_cm_00 `basename $sequence` $cm $LOG
 cd ..
 
-# we are done with CABS, go back to where we came from (above $name)
-popd
+if [ ! -d $out/cabs/models_unscored ] ; then 
+    mkdir -p $out/cabs/models_unscored
+fi
 
-exit
+cd $out
+cp cabs/*.pdb cabs/models_unscored
+eval apollo $sequence cabs/models_unscored
+cd ..
+# Copy the best models in the directory based on the apollo scores
+
+
 # This should probably be in the CABS script
 #cp */solution-top/*pdb models_unscored
 #cp [1-5].*.pdb models_unscored
-
+#apollo $sequence models_unscored
 
 ######################################################################
 #                                                                    #
@@ -288,6 +317,36 @@ exit
 ######################################################################
 
 
+######################################################################
+#                                                                    #
+# Prepare everything for MARTINI                                     #
+#                                                                    #
+######################################################################
+
+# Create a directory inside $out where we will run Martini for the 5 best
+# best models obtained from the cabs simulation, scored by apollo 
+if [ ! -d $out/martini ] ; then 
+    mkdir -p $out/martini
+fi
+
+#Check if apollo worked and copy the 5 best models to the martini directory
+cd $out
+if [ -s cabs/${nam}.apollo/models_unscored.avg ] ; then
+    cat cabs/${nam}.apollo/models_unscored.avg \
+    | tail -n+5 \
+    | head -n5 \
+    | while read model score ; do
+          if [ -s cabs/models_unscored/$model ] ; then
+              cp cabs/models_unscored/$model ./martini
+          else
+              warncont "$model does not exist or is empty"
+          fi
+      done
+fi
+cd ..
+
+# copy the five best models models to the MARTINI folder
+#cp $out/best_models/*pdb $out/martini/
 
 ######################################################################
 #                                                                    #
@@ -295,6 +354,9 @@ exit
 #                                                                    #
 ######################################################################
 
+cd $out
+eval martini $LOG
+cd ..
 
 
 ######################################################################
