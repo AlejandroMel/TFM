@@ -1,25 +1,17 @@
 #!/bin/bash
 
-MYHOME=~/work/amelones/script
-MAXJOBS=`nproc`
-MAXJOBS=$(( MAXJOBS / 3 ))
-#MAXJOBS=8
-
-
+# get arguments
 sequence=${1:-sequence.fasta}
 cm=${2:-contactmap.rr5}
 
-if [ ! -e "$sequence" ] ; then
-    echo "ERROR: sequence $sequence does not exist"
-    echo "Usage: cabscm sequence.fasta contactmap.rr5"
-    exit 1
-fi
-if [ ! -e "$cm" ] ; then
-    echo "ERROR: contact map $cm does not exist"
-    echo "Usage: cabscm sequence.fasta contactmap.rr5"
-    exit 1
-fi
+# SETUP base variables
+export myname=`basename "${BASH_SOURCE[0]}"`
+export mydir=`dirname "${BASH_SOURCE[0]}"`
+export MYHOME=`realpath $mydir`
 
+MAXJOBS=`nproc`
+MAXJOBS=$(( MAXJOBS / 3 ))
+#MAXJOBS=8
 
 comment=''
 # this allows inline comments of the form
@@ -115,10 +107,45 @@ function generate_3D_templates()
     # them as well.
 }
 
+function fix_3D_templates() {
+    # XXX JR XXX THIS IS AN UGLY HACK PENDING CORRECT REWRITING
+    # THIS IS BECAUSE IN SOME CASES, PepBuilder results in negative coordinates
+    # larger than -1000.000. This shifts all the coordinates one space right
+    # and breaks the PDB format, leading to a failure of CABS.
+    # Chimera can read the pdb file and "fix" the coordinates so we just
+    # read the file and save it again. This does not actually FIX the file,
+    # but distorts the X and Y coordinates so they fit in the box.
+    # Thus, it results in a distorted starting structure, but we do not
+    # care because any way, we will model it extensively with CABS.
+    for i in helix sheet coil extended ss pp ; do
+        cp $i.pdb $i.pdb.orig
+        DISPLAY='' chimera --nogui <<END
+            open $i.pdb
+            write format pdb 0 $i.pdb
+END
+    done
+}
+
+if [ ! -e "$sequence" ] ; then
+    echo "ERROR: sequence $sequence does not exist"
+    echo "Usage: cabscm sequence.fasta contactmap.rr5"
+    exit 1
+fi
+if [ ! -e "$cm" ] ; then
+    echo "WARNING: contact map $cm does not exist"
+    echo "Usage: cabscm sequence.fasta contactmap.rr5"
+    echo "SWITCHING TO *NOT* USING A CONTACT MAP"
+    USE_CM="NO"
+else
+    USE_CM="YES"
+fi
+
 
 
 
 generate_3D_templates $sequence
+
+fix_3D_templates
 
 # if $sequence does not exist, then we will not generate any templates
 # and only pre-existing templates will be used, this is ugly, we should
@@ -137,22 +164,27 @@ for i in *.pdb ; do
     fi
 
     (
-
+        
         name=`basename $i .pdb`
-
-        # Prepare CA-rest-file
-        # RR 5-column format is AA1 AA2 dist-min(0) dist-max(8) probability
-        # CABS format is AA1 AA2 distance weight
-        # Use with minimal distance
-        cat "$cm"  | cut -f1,2,3,5 -d' ' \
-                   | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
-                   > "$name.0.crf"
-        # Use with maximal distance 
-        # this is commented out because it does not give good results
-        #cat "$cm"  | cut -f1,2,4,5 -d' ' \
-        #           | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
-        #           > "$name.8.crf"
-
+        
+        if [ "$USE_CM" == "YES" ] ; then
+            # Prepare CA-rest-file
+            # RR 5-column format is AA1 AA2 dist-min(0) dist-max(8) probability
+            # CABS format is AA1 AA2 distance weight
+            # Use with minimal distance
+            cat "$cm"  | cut -f1,2,3,5 -d' ' \
+                       | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
+                       > "$name.0.crf"
+            # Use with maximal distance 
+            # this is commented out because it does not give good results
+            #cat "$cm"  | cut -f1,2,4,5 -d' ' \
+            #           | sed -e 's/^\([0-9]\+\) \([0-9]\+\) /\1:A \2:A /g' \
+            #           > "$name.8.crf"
+            CONTACT_MAP_OPTIONS='--ca-rest-file "$name.0.crf"'
+        else
+            CONTACT_MAP_OPTIONS='--ca-rest-file "$name.0.crf"'
+        fi 
+        
         # carry out first simulation step
         if [ ! -e "${name}.done" -o ! -s "${name}.doing" ] ; then
             rm -f ${name}.fail
@@ -170,10 +202,10 @@ for i in *.pdb ; do
                      -y 100	${comment# mc-cycles (def: 50)} \
                             ${comment# the trajectory will have 40x100=4000 frames} \
                      -t 3.5 1.0 ${comment# temperature start end (def: 1.4 1.4)} \
-                     --weighted-fit gauss \
+                     --weighted-fit ss \
                      -S 	${comment# save CABS files}\
                      -C 	${comment# save config} \
-                     --ca-rest-file "$name.0.crf" \
+                     $CONTACT_MAP_OPTIONS \
                      ${comment# -L YYMMDDhhmmssfile.cbs (load CABS file)} \
                      |& tee ${name}.log 
             fi
@@ -186,7 +218,7 @@ for i in *.pdb ; do
                 # named after the name of the sequence. Since the model we
                 # are analyzing has a different (standardized) name, we want 
                 # to use it (the model name) instead of the original name of 
-                # the query sequence. After all, the model we are analyzing
+                # the query sequence. After all, the mmodel we are analyzing
                 # corresponds to the original sequence.
                 cp $sequence $name/$name.fasta
                 cd $name
@@ -283,6 +315,8 @@ for i in *.pdb ; do
    
 
 done
+
+wait
 
 if [ ! -e FAIL ] ; then
     touch DONE
