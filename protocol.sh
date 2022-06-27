@@ -11,9 +11,22 @@ name=${name##*/}
 
 maxmodels=5
 
+myname=`basename "${BASH_SOURCE[0]}"`
+mydir=`dirname "${BASH_SOURCE[0]}"`
+MYHOME=`realpath $mydir`
 myhome=~/work/amelones/script
 myhome=`dirname $0`
 myhome=`realpath $myhome`
+
+# Utilities
+export FUNCS_BASE=$myhome/lib
+source $FUNCS_BASE/fs_funcs.bash
+source $FUNCS_BASE/util_funcs.bash
+
+
+redirect_std_out_err $name/log $myname.$name
+
+VERBOSE=1
 
 ######################################################################
 #                                                                    #
@@ -26,16 +39,23 @@ myhome=`realpath $myhome`
 #	(ideally we would like to also run Sparks and RaptorX)
 # DNCon2
 #	with various methods (confold1, confold2 and unicon3d)
+# Alphafold2
 #
 # Multicom
 #	(ideally we would include Quark, C-Quark and Rosetta as well)
 #
-# Pfi-Psi-prediction
+# Phi-Psi-prediction
 # Secondary structure prediction
 # naïve structures (alpha, beta, coiled-coil, extended, random)
 
-mkdir -p $name
+
+mkdir -p $name		# (should have already been created for the log file)
+# save a copy of the sequence
 cp $sequence $name
+
+
+# I-TASSER
+# --------
 # Try to generate an homology model using I-TASSER inside
 # the $name directory
 # if the directory does not exist we have not run i-tasser yet
@@ -43,34 +63,46 @@ if [ ! -d $name/i-tasser/$name ] ; then
     # if there is not at least one model, try again
     if [ ! -e $name/i-tasser/$name/model1.pdb ] ; then
         cd $name
-        i-tasser `basename $sequence`
+        # this will save i-tasser-specific output to detailed log files
+        eval i-tasser `basename $sequence` $LOG
         cd ..
     fi
+else
+    echo "Using already existing I-TASSER predictions"
 fi
 
+# ALPHAFOLD
+# ---------
 # Try to generate an ab-initio model using alphafold inside
 # the $name directory
 # If alphafold hasn't been run yet there will be no directory
 if [ ! -e $name/alphafold/$name ] ; then
     if [ -x ~/contrib/alphafold/bin/alphafold ] ; then
         cd $name
-	~/contrib/alphafold/bin/alphafold $sequence
+        # this will save alphafold-specific output to detailed log files
+	eval ~/contrib/alphafold/bin/alphafold $sequence $LOG
         cd ..
     else
 	echo "Not using AlphaFold2 because it is not installed"
         #exit 1
     fi
+else
+    echo "Using already existing AlphaFold2 predictions"
 fi
 
-# NOTE: THIS SHOULD BE A FUNCTION (FOR CLARITY, MOSTLY)'
+
+# DNCON2
+# ------
 # dncon2 will create a directory named $name/dncon2 to save its output
 # that's why we start it from above $name (no need to enter into it)
 if [ ! -d ./$name/dncon2/confold2-$name.dncon2/top-models ] ; then
     echo "Running DNCON2"
     # this will save all the results in "./dncon2/"
-    $myhome/dncon2.sh $sequence CONFOLD2
+    eval $myhome/dncon2.sh $sequence CONFOLD2 $LOG
     #$myhome/dncon2.sh $sequence CONFOLD1	# we considered doing these too
     #$myhome/dncon2.sh $sequence UNICON3D	# but they were worse
+else
+    echo "Using already existing DNCON2 predictions"
 fi
 
 # the resulting models will be in ./dncon2/confold2-$name.dncon2/top-models
@@ -79,12 +111,12 @@ fi
 # first we check if confold2 was run
 if [ -d $name/dncon2/confold2-$name.dncon2/ ] ; then
     # remember current position for later and 'cd' to the confold2 directory
-    pushd $name/dncon2/confold2-$name.dncon2/		# google this for info
+    pushd $name/dncon2/confold2-$name.dncon2/		# google 'pushd' for info
     
     # check if apollo has already been run
     if [ ! -s $name.apollo/top-models.avg ] ; then
 	echo "Running apollo on CONFOLD2 top-models"
-	$myhome/apollo.sh $sequence top-models
+	eval $myhome/apollo.sh $sequence top-models $LOG
     fi
 
     # check if apollo run successfully
@@ -95,22 +127,24 @@ if [ -d $name/dncon2/confold2-$name.dncon2/ ] ; then
 
     # let us select the best $maxmodels models produced by CONFOLD2 and 
     # store them named by score order
-    if [ ! -e ../models/1.*.pdb ] ; then
+    if [ ! -e ../starting_models/1.*.pdb ] ; then
 	echo "Selecting $maxmodels best CONFOLD2 models"
-	mkdir -p ../models
+	mkdir -p ../starting_models
 	order=0
 	cat $name.apollo/top-models.avg \
 	| tail -n+5 \
 	| head -n$maxmodels \
 	| while read model score ; do
             order=$(( order + 1 ))
-            #cp top-models/$model ../models/$order.confold2.$model
-	    cp top-models/$model ../models/$order.$model
+            #cp top-models/$model ../starting_models/$order.confold2.$model
+	    cp top-models/$model ../starting_models/$order.$model
 	done
     fi
     # recover our last saved position and return to it
     popd	# return to where we came from (above $name)
 fi
+
+
 
 ######################################################################
 #                                                                    #
@@ -140,9 +174,34 @@ if [ ! -s cabs/1.i-tasser-model1.pdb ] ; then
             # we cannot just copy because i-tasser does not define chain-IDs
 	    #cp i-tasser/$name/model$i.pdb cabs/$i.i-tasser-model$i.pdb
             # add chain-ID to models and save them in cabs directory
+            # XX JR XXX 
+            # NOTE: THIS NEEDS TO BE CORRECTED FOR MULTI-CHAIN MODELS
             cat i-tasser/$name/model$i.pdb \
             | sed -e '/^ATOM  / s/\(.\{21\}\) /\1A/' \
             > cabs/$i.i-tasser-model$i.pdb
+        fi
+    done
+fi
+
+# check if alphafold generated any models and copy them to the cabs folder
+if [ -s alphafold/$name/ranked_1.pdb ] ; then
+    # ranked are relaxed models renumbered by quality
+    # so their numbers may not match
+    for i in 0 1 2 3 4 ; do
+        f=alphafold/$name/ranked_$i.pdb
+        cp $f cabs/`echo $f | sed -e 's/relaxed_model/alphafold/g'`
+    done
+else
+    # unrelaxed are as output by alphafold
+    # relaxed are the unrelaxed after AMBER optimization
+    # so, we prefer first relaxed and if there is none, unrelaxed
+    for i in 1 2 3 4 5 ; do
+        fr=alphafold/$name/relaxed_model_$i.pdb
+        fu=alphafold/$name/unrelaxed_model_$i.pdb
+        if [ -s $fr ] ; then
+            cp $fr cabs/alphafold_opt_$i.pdb
+        elif [ -s $fu ] ; then
+            cp $fu cabs/alphafold_raw_$i.pdb
         fi
     done
 fi
@@ -153,7 +212,8 @@ if [ -s dncon2/$name.rr.raw ] ; then
     cp dncon2/$cm cabs
 else
     echo "ERROR: DNCON2 did not create a Contact Matrix $name.rr.raw"
-    exit 1
+    #exit 1   #comment this line in case you detect scarce alignments 
+    #during the execution of dncon2 for your protein
 fi
 
 # check if CONFOLD2 could generate any models and add them for CABS refinement
@@ -186,7 +246,8 @@ fi
 
 
 cd cabs
-$myhome/cabscm00.02.sh `basename $sequence` $cm
+eval $myhome/cabscm00.03.sh `basename $sequence` $cm $LOG
+
 cd ..
 
 # we are done with CABS, go back to where we came from (above $name)
