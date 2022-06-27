@@ -1,5 +1,13 @@
 #!/bin/bash
 
+myname=`basename "${BASH_SOURCE[0]}"`
+mydir=`dirname "${BASH_SOURCE[0]}"`
+myhome=`realpath $mydir`
+itasser_home=$myhome
+# use this if run on a different directory
+itasser_home=~/contrib/I-TASSER5.2
+
+
 # this is to allow setting $file as an environment variable
 if [ "$file" == "" ] ; then
     file=${1:-"protein.fasta"}
@@ -20,7 +28,7 @@ mkdir -p $d/i-tasser/$n
 cp $file $d/i-tasser/$n/
 cp $file $d/i-tasser/$n/seq.fasta
 
-echo ~/contrib/I-TASSER5.1/I-TASSERmod/runI-TASSER.pl \
+echo $itasser_home/I-TASSERmod/runI-TASSER.pl \
 	-pkgdir ~/contrib/I-TASSER5.1/ \
 	-libdir /db/i-tasser \
 	-runstyle gnuparallel \
@@ -34,7 +42,7 @@ echo ~/contrib/I-TASSER5.1/I-TASSERmod/runI-TASSER.pl \
         $*
 
 
-~/contrib/I-TASSER5.1/I-TASSERmod/runI-TASSER.pl \
+$itasser_home/I-TASSERmod/runI-TASSER.pl \
 	-pkgdir ~/contrib/I-TASSER5.1/ \
 	-libdir /db/i-tasser \
 	-runstyle gnuparallel \
