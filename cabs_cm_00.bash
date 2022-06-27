@@ -24,6 +24,11 @@ ${comment+ whatever
 	   (and even multiline comments) }
 
 
+# NOTE: of the directory we are in already contains any PDB file, it will
+# be refined too. This allows for the caller to "inject" additional models
+# to try.
+#
+
 function generate_3D_templates()
 {
     # this ensures that $sequence has a value (if none was given, then
@@ -153,7 +158,22 @@ fix_3D_templates
 
 # process each starting configuration in turn using two steps
 
-njobs=0
+
+function run_CABS() {
+
+    # This is a function to refine all the pdb files using the CABS algorithm
+    # and predict their protein structure. It has only one argument
+    # that will be called Contact_mat. This varaible can take two different values.
+    # They will depend on wether after running DNCON2 a contact matrix for our protein
+    # was obtained or not. Then this variable will be used to adjust the parameters
+    # of the simulation and run the algorithm. 
+
+njobs=0     	
+Contact_mat=$1
+
+if [[ $# -ne 1 ]] ; then
+    echo "ERROR: function run_CABS requires only one argument"
+fi
 for i in *.pdb ; do
     if [[ "$i" == *"+.pdb" ]] ; then echo ">>> skipping $i" ; continue ; fi
     echo ">>> Refining $i"
@@ -167,7 +187,7 @@ for i in *.pdb ; do
         
         name=`basename $i .pdb`
         
-        if [ "$USE_CM" == "YES" ] ; then
+        if [ $Contact_mat == "YES" ] ; then
             # Prepare CA-rest-file
             # RR 5-column format is AA1 AA2 dist-min(0) dist-max(8) probability
             # CABS format is AA1 AA2 distance weight
@@ -182,7 +202,7 @@ for i in *.pdb ; do
             #           > "$name.8.crf"
             CONTACT_MAP_OPTIONS='--ca-rest-file "$name.0.crf"'
         else
-            CONTACT_MAP_OPTIONS='--ca-rest-file "$name.0.crf"'
+            CONTACT_MAP_OPTIONS=''
         fi 
         
         # carry out first simulation step
@@ -202,7 +222,7 @@ for i in *.pdb ; do
                      -y 100	${comment# mc-cycles (def: 50)} \
                             ${comment# the trajectory will have 40x100=4000 frames} \
                      -t 3.5 1.0 ${comment# temperature start end (def: 1.4 1.4)} \
-                     --weighted-fit ss \
+                     --weighted-fit gauss \
                      -S 	${comment# save CABS files}\
                      -C 	${comment# save config} \
                      $CONTACT_MAP_OPTIONS \
@@ -244,7 +264,7 @@ for i in *.pdb ; do
         fi
 
         # carry out a second simulation step using the best first model 
-        # produced djin the previous step.
+        # produced in the previous step.
         if [ ! -e "${name}+.done" ] ; then
             if [ -e ${name}.apollo/models.avg ] ; then
                 echo ">>> $name SCORED USING APOLLO"
@@ -312,9 +332,11 @@ for i in *.pdb ; do
     ) &
 
     njobs=$((njobs + 1))
-   
-
+    
 done
+
+}
+run_CABS $USE_CM
 
 wait
 
