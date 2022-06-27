@@ -1,14 +1,26 @@
 file=$1
+FOLD=${2:-"CONFOLD2"}
+
+if [ -z "$FOLD" ] ; then FOLD="CONFOLD2" ; fi
+#FOLD="CONFOLD2"	# CONFOLD2 CONFOLD1 UNICON3D
+#FOLD="UNICON3D"
+#FOLD="CONFOLD1"
 
 comment=''	# enable comments
 
-FOLD="CONFOLD2"	# CONFOLD2 CONFOLD1 UNICON3D
-#FOLD="UNICON3D"
-#FOLD="CONFOLD1"
+if [ ! -e "$file" ] ; then echo "ERROR: $file does not exist"; exit 1; fi
 
 #some/directory/file.1.fa
 filename=${file##*/}	# remove everything until the last /
 name=${filename%.*}	# remove the last . and whatever follows from file name
+
+mkdir -p $name	#create working directory
+
+# copy sequence to working directory
+cp $file $name/$name.fasta
+
+cd $name 	#move to working directory
+
 
 if [ ! -s "$name.fasta" ] ; then
     cp "$file" "${name}.fasta"
@@ -109,6 +121,9 @@ elif [ "$FOLD" == "UNICON3D" ] ; then
             mv `basename $i .pdb`.rebuilt.pdb unicon3d_models
         done
     fi
+else
+
+    echo "ERROR: unknown fold method $FOLD"
 
 fi
 cd -
