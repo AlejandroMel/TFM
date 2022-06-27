@@ -22,7 +22,8 @@ myhome=`realpath $myhome`
 export FUNCS_BASE=$myhome/lib
 source $FUNCS_BASE/fs_funcs.bash
 source $FUNCS_BASE/util_funcs.bash
-
+source $FUNCS_BASE/split_fasta.sh
+source $FUNCS_BASE/modellerscr.sh
 
 redirect_std_out_err $name/log $myname.$name
 
@@ -52,6 +53,27 @@ VERBOSE=1
 mkdir -p $name		# (should have already been created for the log file)
 # save a copy of the sequence
 cp $sequence $name
+cp $sequence $name/sequence.fasta
+
+split_fasta_seq_to_dir $name/sequence.fasta $name
+nchunks=$?
+if [ $nchunks -gt 1 ] ; then
+    cd $name
+    # run this script on each of the subsequences    
+    for i in *overlap.fasta ; do
+        $0 $i
+    done
+    # at this point we should have models for each of the overlapping
+    # subsequences
+    # now we need to run modeller using as templates the models selected
+    # for each of the subsequences to get a full model for the whole 
+    # protein
+    mkdir -p modeller
+    cp $sequence modeller/sequence.fasta
+    cd modeller
+    build_model_from_pieces modeller/sequence.fasta 
+    exit
+fi
 
 
 # I-TASSER
@@ -67,8 +89,6 @@ if [ ! -d $name/i-tasser/$name ] ; then
         eval i-tasser `basename $sequence` $LOG
         cd ..
     fi
-else
-    echo "Using already existing I-TASSER predictions"
 fi
 
 # ALPHAFOLD
@@ -86,8 +106,6 @@ if [ ! -e $name/alphafold/$name ] ; then
 	echo "Not using AlphaFold2 because it is not installed"
         #exit 1
     fi
-else
-    echo "Using already existing AlphaFold2 predictions"
 fi
 
 
@@ -101,8 +119,6 @@ if [ ! -d ./$name/dncon2/confold2-$name.dncon2/top-models ] ; then
     eval $myhome/dncon2.sh $sequence CONFOLD2 $LOG
     #$myhome/dncon2.sh $sequence CONFOLD1	# we considered doing these too
     #$myhome/dncon2.sh $sequence UNICON3D	# but they were worse
-else
-    echo "Using already existing DNCON2 predictions"
 fi
 
 # the resulting models will be in ./dncon2/confold2-$name.dncon2/top-models
@@ -111,7 +127,7 @@ fi
 # first we check if confold2 was run
 if [ -d $name/dncon2/confold2-$name.dncon2/ ] ; then
     # remember current position for later and 'cd' to the confold2 directory
-    pushd $name/dncon2/confold2-$name.dncon2/		# google 'pushd' for info
+    pushd $name/dncon2/confold2-$name.dncon2/		# google this for info
     
     # check if apollo has already been run
     if [ ! -s $name.apollo/top-models.avg ] ; then
@@ -127,17 +143,17 @@ if [ -d $name/dncon2/confold2-$name.dncon2/ ] ; then
 
     # let us select the best $maxmodels models produced by CONFOLD2 and 
     # store them named by score order
-    if [ ! -e ../starting_models/1.*.pdb ] ; then
+    if [ ! -e ../models/1.*.pdb ] ; then
 	echo "Selecting $maxmodels best CONFOLD2 models"
-	mkdir -p ../starting_models
+	mkdir -p ../models
 	order=0
 	cat $name.apollo/top-models.avg \
 	| tail -n+5 \
 	| head -n$maxmodels \
 	| while read model score ; do
             order=$(( order + 1 ))
-            #cp top-models/$model ../starting_models/$order.confold2.$model
-	    cp top-models/$model ../starting_models/$order.$model
+            #cp top-models/$model ../models/$order.confold2.$model
+	    cp top-models/$model ../models/$order.$model
 	done
     fi
     # recover our last saved position and return to it
@@ -174,8 +190,6 @@ if [ ! -s cabs/1.i-tasser-model1.pdb ] ; then
             # we cannot just copy because i-tasser does not define chain-IDs
 	    #cp i-tasser/$name/model$i.pdb cabs/$i.i-tasser-model$i.pdb
             # add chain-ID to models and save them in cabs directory
-            # XX JR XXX 
-            # NOTE: THIS NEEDS TO BE CORRECTED FOR MULTI-CHAIN MODELS
             cat i-tasser/$name/model$i.pdb \
             | sed -e '/^ATOM  / s/\(.\{21\}\) /\1A/' \
             > cabs/$i.i-tasser-model$i.pdb
