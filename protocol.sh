@@ -48,6 +48,20 @@ if [ ! -d $name/i-tasser/$name ] ; then
     fi
 fi
 
+# Try to generate an ab-initio model using alphafold inside
+# the $name directory
+# If alphafold hasn't been run yet there will be no directory
+if [ ! -e $name/alphafold/$name ] ; then
+    if [ -x ~/contrib/alphafold/bin/alphafold ] ; then
+        cd $name
+	~/contrib/alphafold/bin/alphafold $sequence
+        cd ..
+    else
+	echo "Not using AlphaFold2 because it is not installed"
+        #exit 1
+    fi
+fi
+
 # NOTE: THIS SHOULD BE A FUNCTION (FOR CLARITY, MOSTLY)'
 # dncon2 will create a directory named $name/dncon2 to save its output
 # that's why we start it from above $name (no need to enter into it)
